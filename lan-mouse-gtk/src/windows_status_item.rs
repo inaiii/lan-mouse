@@ -24,6 +24,12 @@ use crate::window::Window;
 
 const APP_ICON_RESOURCE: &str = "/de/feschber/LanMouse/icons/de.feschber.LanMouse.svg";
 
+/// Raster fallback: PNG decoding is built into gdk-pixbuf, while SVG
+/// needs the external librsvg loader module, which distributed builds
+/// may lack.
+const APP_ICON_RESOURCE_PNG: &str =
+    "/de/feschber/LanMouse/icons/128x128/apps/de.feschber.LanMouse.png";
+
 /// 32 px stays crisp at the common 100–200% DPI scales; Windows scales
 /// down to the actual small-icon metric as needed.
 const ICON_SIZE: i32 = 32;
@@ -154,17 +160,23 @@ pub fn setup(app: &adw::Application, window: &Window) -> bool {
     true
 }
 
-/// Render the bundled SVG app icon into packed RGBA8 for
-/// [`Icon::from_rgba`].
+/// Render the bundled app icon into packed RGBA8 for
+/// [`Icon::from_rgba`]: the SVG for crispness where the loader is
+/// available, the pre-rendered PNG otherwise.
 fn render_icon_rgba(size: i32) -> Option<Icon> {
-    let pixbuf =
-        match gdk_pixbuf::Pixbuf::from_resource_at_scale(APP_ICON_RESOURCE, size, size, true) {
-            Ok(pixbuf) => pixbuf,
-            Err(e) => {
-                log::warn!("failed to render tray icon at {size}px: {e}");
-                return None;
-            }
-        };
+    [APP_ICON_RESOURCE, APP_ICON_RESOURCE_PNG]
+        .iter()
+        .find_map(|resource| render_resource_rgba(resource, size))
+}
+
+fn render_resource_rgba(resource: &str, size: i32) -> Option<Icon> {
+    let pixbuf = match gdk_pixbuf::Pixbuf::from_resource_at_scale(resource, size, size, true) {
+        Ok(pixbuf) => pixbuf,
+        Err(e) => {
+            log::debug!("failed to render tray icon {resource} at {size}px: {e}");
+            return None;
+        }
+    };
 
     let width = pixbuf.width();
     let height = pixbuf.height();
