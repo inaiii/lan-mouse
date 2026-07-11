@@ -4,6 +4,8 @@ mod client_row;
 mod fingerprint_window;
 mod key_object;
 mod key_row;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux_status_item;
 #[cfg(target_os = "macos")]
 mod macos_privacy;
 #[cfg(target_os = "macos")]
@@ -20,6 +22,13 @@ use window::Window;
 /// peer's [`lan_mouse_ipc::ClientState::peer_commit`] for the
 /// soft-warn version-mismatch indicator.
 pub(crate) static LOCAL_COMMIT: OnceLock<[u8; 8]> = OnceLock::new();
+
+/// Whether the lan-mouse service is a child of this process, set once
+/// by [`run`] before the GTK main loop starts. When `false` the GUI is
+/// a pure client of an external daemon (e.g. a systemd service): it
+/// then runs as a plain window — no tray icon, closing the window
+/// quits the frontend and leaves the daemon untouched.
+pub(crate) static OWNS_SERVICE: OnceLock<bool> = OnceLock::new();
 
 /// Convenience: returns the local commit as an 8-char ASCII string,
 /// or a placeholder if unset (which would indicate a programmer
@@ -49,11 +58,14 @@ pub enum GtkError {
     NonZeroExitCode(i32),
 }
 
-pub fn run(local_commit: [u8; 8]) -> Result<(), GtkError> {
+pub fn run(local_commit: [u8; 8], owns_service: bool) -> Result<(), GtkError> {
     log::debug!("running gtk frontend");
     LOCAL_COMMIT
         .set(local_commit)
         .expect("local_commit set once");
+    OWNS_SERVICE
+        .set(owns_service)
+        .expect("owns_service set once");
 
     #[cfg(windows)]
     let ret = std::thread::Builder::new()
@@ -199,6 +211,15 @@ fn setup_menu(app: &adw::Application) {
 }
 
 fn build_ui(app: &Application) {
+    // GApplication is single-instance: launching the binary again
+    // activates the primary instance instead. Re-present the existing
+    // window rather than building a second UI — this is the "reopen"
+    // path while the window is hidden in the tray.
+    if let Some(window) = app.windows().into_iter().next() {
+        window.present();
+        return;
+    }
+
     log::debug!("connecting to lan-mouse-socket");
     let (mut frontend_rx, frontend_tx) = match lan_mouse_ipc::connect() {
         Ok(conn) => conn,
@@ -260,6 +281,29 @@ fn build_ui(app: &Application) {
         });
     }
 
+    // Mirror the macOS menu bar behavior: when a StatusNotifierItem
+    // host is available, closing the window only hides it and the
+    // tray menu is used to re-open or quit. Without a tray host the
+    // default close-means-quit behavior is kept, since a hidden
+    // window would otherwise be unreachable. When the service belongs
+    // to an external daemon the GUI is a pure client and gets no tray
+    // at all — quitting it must not suggest stopping the service.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let tray_active = {
+        let owns_service = OWNS_SERVICE.get().copied().unwrap_or(true);
+        if !owns_service {
+            log::debug!("client of an external lan-mouse daemon, not creating a tray icon");
+        }
+        let tray_active = owns_service && linux_status_item::setup(app, &window);
+        if tray_active {
+            window.connect_close_request(|window| {
+                window.set_visible(false);
+                glib::Propagation::Stop
+            });
+        }
+        tray_active
+    };
+
     glib::spawn_future_local(clone!(
         #[weak]
         window,
@@ -307,8 +351,16 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     window.present();
+
+    // Like on macOS below: present on every launch unless
+    // `LAN_MOUSE_HIDDEN=1` requests a quiet start into the tray.
+    // Without a tray the window is always presented.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if !tray_active || env::var_os("LAN_MOUSE_HIDDEN").is_none() {
+        window.present();
+    }
 
     // On macOS, default to presenting the main window on every launch
     // so the user gets a visible confirmation that the app is running
