@@ -11,6 +11,8 @@ mod macos_privacy;
 #[cfg(target_os = "macos")]
 mod macos_status_item;
 mod window;
+#[cfg(windows)]
+mod windows_status_item;
 
 use std::{env, process, str, sync::OnceLock};
 
@@ -27,7 +29,9 @@ pub(crate) static LOCAL_COMMIT: OnceLock<[u8; 8]> = OnceLock::new();
 /// by [`run`] before the GTK main loop starts. When `false` the GUI is
 /// a pure client of an external daemon (e.g. a systemd service): it
 /// then runs as a plain window — no tray icon, closing the window
-/// quits the frontend and leaves the daemon untouched.
+/// quits the frontend and leaves the daemon untouched. Only Linux
+/// distinguishes this case; on macOS and Windows the service is always
+/// a child of this process and the flag is ignored.
 pub(crate) static OWNS_SERVICE: OnceLock<bool> = OnceLock::new();
 
 /// Convenience: returns the local commit as an 8-char ASCII string,
@@ -304,6 +308,23 @@ fn build_ui(app: &Application) {
         tray_active
     };
 
+    // Mirror macOS: the daemon is always a child of this process on
+    // Windows (no external-daemon detection), so the tray is set up
+    // unconditionally. Only if tray creation actually fails does the
+    // window keep the default close-means-quit behavior, since a
+    // hidden window would otherwise be unreachable.
+    #[cfg(windows)]
+    let tray_active = {
+        let tray_active = windows_status_item::setup(app, &window);
+        if tray_active {
+            window.connect_close_request(|window| {
+                window.set_visible(false);
+                glib::Propagation::Stop
+            });
+        }
+        tray_active
+    };
+
     glib::spawn_future_local(clone!(
         #[weak]
         window,
@@ -351,8 +372,13 @@ fn build_ui(app: &Application) {
         }
     ));
 
+    // Like on Linux below: present on every launch unless
+    // `LAN_MOUSE_HIDDEN=1` requests a quiet start into the tray.
+    // Without a tray the window is always presented.
     #[cfg(windows)]
-    window.present();
+    if !tray_active || env::var_os("LAN_MOUSE_HIDDEN").is_none() {
+        window.present();
+    }
 
     // Like on macOS below: present on every launch unless
     // `LAN_MOUSE_HIDDEN=1` requests a quiet start into the tray.
