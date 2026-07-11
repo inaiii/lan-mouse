@@ -71,6 +71,9 @@ notify = "8.2.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 [features]
 default = [
     "gtk",
