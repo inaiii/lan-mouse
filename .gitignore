@@ -12,3 +12,9 @@ extfile.conf
 # flatpak files
 .flatpak-builder
 repo
+
+# makepkg build artifacts
+/pkg
+/src
+/PKGBUILD
+*.pkg.tar.*

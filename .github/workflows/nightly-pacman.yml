@@ -1,0 +1,45 @@
+name: Nightly Pacman Package
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pacman-package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed sudo git rust gtk4 libadwaita libx11 libxtst
+
+      - name: Create unprivileged build user
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v6
+
+      - name: Allow git commands in workspace owned by another user
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Hand workspace over to build user
+        run: chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: makepkg
+        run: |
+          # makepkg requires PKGBUILD to sit in the CWD; packaging/pacman/PKGBUILD
+          # is the source of truth, copy it to the repo root just for the build.
+          cp packaging/pacman/PKGBUILD PKGBUILD
+          su - builder -c "cd '$GITHUB_WORKSPACE' && makepkg --noconfirm --syncdeps --clean"
+          rm PKGBUILD
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: lan-mouse-x86_64-pacman
+          path: "*.pkg.tar.zst"
