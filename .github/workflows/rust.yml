@@ -40,7 +40,7 @@ jobs:
           py -m venv .venv
           .venv\Scripts\activate.ps1
           py -m pip install gvsbuild==2026.6.0
-          gvsbuild build --vs-ver 17 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
+          gvsbuild build --vs-ver vs2022 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
 
   ci:
     name: ${{ matrix.job }} ${{ matrix.os }}
