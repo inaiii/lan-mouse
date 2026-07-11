@@ -22,6 +22,26 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
+  windows-gtk:
+    name: Prepare GTK for Windows
+    runs-on: windows-2022
+    steps:
+      - name: Create GTK directory
+        run: mkdir C:\gtk-build\gtk\x64\release
+      - name: Restore GTK cache
+        id: gtk-cache
+        uses: actions/cache@v6
+        with:
+          path: C:\gtk-build\gtk\x64\release
+          key: gtk-windows-vs2022-gvsbuild-2026.6.0
+      - name: Build GTK
+        if: steps.gtk-cache.outputs.cache-hit != 'true'
+        run: |
+          py -m venv .venv
+          .venv\Scripts\activate.ps1
+          py -m pip install gvsbuild==2026.6.0
+          gvsbuild build --vs-ver 17 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
+
   ci:
     name: ${{ matrix.job }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -30,7 +50,6 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - windows-latest
           - macos-latest
           - macos-15-intel
         job:
@@ -55,35 +74,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ env.MACOS_LIB_VER }}
-      - name: Install Windows Dependencies - create gtk dir
-        if: runner.os == 'Windows'
-        run: mkdir C:\gtk-build\gtk\x64\release
-      - name: Install Windows Dependencies - install gtk from cache
-        uses: actions/cache@v3
-        if: runner.os == 'Windows'
-        id: cache
-        with:
-          path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build
-          restore-keys: gtk-windows-build
-      - name: Install Windows Dependencies - update PATH
-        if: runner.os == 'Windows'
-        run: |
-          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "C:\pkg-config-lite-0.28-1\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo $env:GITHUB_PATH
-          echo $env:PATH
-      - name: Install Windows dependencies - build gtk
-        if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
-        run: |
-          # choco install msys2
-          # choco install visualstudio2022-workload-vctools
-          # choco install pkgconfiglite
-          py -m venv .venv
-          .venv\Scripts\activate.ps1
-          py -m pip install gvsbuild
-          gvsbuild build --msys-dir=C:\msys64 gtk4 libadwaita librsvg
       - name: cargo build
         if: matrix.job == 'build'
         run: cargo build
@@ -100,6 +90,48 @@ jobs:
         if: matrix.job == 'clippy'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - uses: clechasseur/rs-clippy-check@v4
+        if: matrix.job == 'clippy'
+        with:
+          args: --workspace --all-targets --all-features
+
+  windows-ci:
+    name: ${{ matrix.job }} windows-2022
+    needs: windows-gtk
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - build
+          - check
+          - clippy
+          - test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore GTK cache
+        uses: actions/cache@v6
+        with:
+          path: C:\gtk-build\gtk\x64\release
+          key: gtk-windows-vs2022-gvsbuild-2026.6.0
+          fail-on-cache-miss: true
+      - name: Configure GTK environment
+        run: |
+          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: cargo build
+        if: matrix.job == 'build'
+        run: cargo build
+      - name: cargo check
+        if: matrix.job == 'check'
+        run: cargo check --workspace --all-targets --all-features
+      - name: cargo test
+        if: matrix.job == 'test'
+        run: cargo test --workspace --all-features
+      - name: cargo clippy
+        if: matrix.job == 'clippy'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - uses: clechasseur/rs-clippy-check@v4
         if: matrix.job == 'clippy'
         with:
