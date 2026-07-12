@@ -8,7 +8,7 @@ env:
 
 jobs:
   pacman-package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: archlinux:base-devel
     steps:
@@ -45,7 +45,13 @@ jobs:
           path: "*.pkg.tar.zst"
 
   windows-package:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    env:
+      # single knob for the GTK toolchain: picks the gvsbuild release (and
+      # thereby the gtk4/libadwaita/librsvg versions it builds) and keys the
+      # cache, so bumping it invalidates the cache instead of being masked
+      # by it
+      GVSBUILD_VERSION: '2026.6.0'
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -55,12 +61,13 @@ jobs:
       - name: Create gtk dir
         run: mkdir C:\gtk-build\gtk\x64\release
 
+      # no restore-keys on purpose: a prefix match would silently restore a
+      # toolchain built by a different gvsbuild release
       - uses: actions/cache@v4
         id: cache
         with:
           path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build
-          restore-keys: gtk-windows-build
+          key: gtk-windows-build-${{ env.GVSBUILD_VERSION }}
 
       - name: Set up toolchain environment
         run: |
@@ -75,7 +82,7 @@ jobs:
         run: |
           py -m venv .venv
           .venv\Scripts\activate.ps1
-          py -m pip install gvsbuild
+          py -m pip install gvsbuild==$env:GVSBUILD_VERSION
           # git's bundled unix tools shadow the msys2 ones gvsbuild needs,
           # see https://github.com/wingtk/gvsbuild/pull/1004
           Move-Item "C:\Program Files\Git\usr\bin" "C:\Program Files\Git\usr\notbin"
