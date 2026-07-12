@@ -50,7 +50,7 @@ jobs:
       # single knob for the GTK toolchain: picks the gvsbuild release (and
       # thereby the gtk4/libadwaita/librsvg versions it builds) and keys the
       # cache, so bumping it invalidates the cache instead of being masked
-      # by it
+      # by it; keep in sync with rust.yml, which shares the cache
       GVSBUILD_VERSION: '2026.6.0'
     steps:
       - uses: actions/setup-python@v5

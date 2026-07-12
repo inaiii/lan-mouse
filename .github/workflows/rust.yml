@@ -16,7 +16,7 @@ concurrency:
 jobs:
   fmt:
     name: Formatting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: cargo fmt
@@ -25,13 +25,17 @@ jobs:
   ci:
     name: ${{ matrix.job }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      # keep in sync with nightly.yml: the same version and cache key mean
+      # checks and packaging share one gtk toolchain cache
+      GVSBUILD_VERSION: '2026.6.0'
     strategy:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+          - ubuntu-24.04
+          - windows-2025
+          - macos-15
           - macos-15-intel
         job:
           - build
@@ -55,35 +59,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ env.MACOS_LIB_VER }}
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.11'
+      # the cache path must exist before the restore step runs
       - name: Install Windows Dependencies - create gtk dir
         if: runner.os == 'Windows'
         run: mkdir C:\gtk-build\gtk\x64\release
+      # no restore-keys on purpose: a prefix match would silently restore a
+      # toolchain built by a different gvsbuild release
       - name: Install Windows Dependencies - install gtk from cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         if: runner.os == 'Windows'
         id: cache
         with:
           path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build
-          restore-keys: gtk-windows-build
-      - name: Install Windows Dependencies - update PATH
+          key: gtk-windows-build-${{ env.GVSBUILD_VERSION }}
+      - name: Install Windows Dependencies - set up toolchain environment
         if: runner.os == 'Windows'
         run: |
           echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "C:\pkg-config-lite-0.28-1\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # gvsbuild's pkgconf treats its own prefix as a system directory and
+          # omits the -L flags the linker needs unless this is set
+          echo "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo $env:GITHUB_PATH
-          echo $env:PATH
       - name: Install Windows dependencies - build gtk
         if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
         run: |
-          # choco install msys2
-          # choco install visualstudio2022-workload-vctools
-          # choco install pkgconfiglite
           py -m venv .venv
           .venv\Scripts\activate.ps1
-          py -m pip install gvsbuild
+          py -m pip install gvsbuild==$env:GVSBUILD_VERSION
+          # git's bundled unix tools shadow the msys2 ones gvsbuild needs,
+          # see https://github.com/wingtk/gvsbuild/pull/1004
+          Move-Item "C:\Program Files\Git\usr\bin" "C:\Program Files\Git\usr\notbin"
+          Move-Item "C:\Program Files\Git\bin" "C:\Program Files\Git\notbin"
           gvsbuild build --msys-dir=C:\msys64 gtk4 libadwaita librsvg
+          Move-Item "C:\Program Files\Git\usr\notbin" "C:\Program Files\Git\usr\bin"
+          Move-Item "C:\Program Files\Git\notbin" "C:\Program Files\Git\bin"
       - name: cargo build
         if: matrix.job == 'build'
         run: cargo build
