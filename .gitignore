@@ -14,7 +14,6 @@ extfile.conf
 repo
 
 # makepkg build artifacts
-/pkg
-/src
+/.makepkg/
 /PKGBUILD
 *.pkg.tar.*

@@ -1,10 +1,20 @@
 name: Nightly Package
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pacman-package:
@@ -14,84 +24,110 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          pacman -Syu --noconfirm --needed sudo git rust gtk4 libadwaita libx11 libxtst
+          pacman -Syu --noconfirm --needed git rust gtk4 libadwaita libx11 libxtst namcap desktop-file-utils
 
       - name: Create unprivileged build user
-        run: |
-          useradd -m builder
-          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
-          chmod 440 /etc/sudoers.d/builder
+        run: useradd -m builder
 
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Allow git commands in workspace owned by another user
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Hand workspace over to build user
-        run: chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Prepare unprivileged build workspace
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          install -d -o builder -g builder /home/builder/.cache/makepkg
+          install -o builder -g builder -m644 packaging/pacman/PKGBUILD PKGBUILD
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: makepkg
         run: |
-          # makepkg requires PKGBUILD to sit in the CWD; packaging/pacman/PKGBUILD
-          # is the source of truth, copy it to the repo root just for the build.
-          cp packaging/pacman/PKGBUILD PKGBUILD
-          su - builder -c "cd '$GITHUB_WORKSPACE' && makepkg --noconfirm --syncdeps --clean"
+          su - builder -c "cd '$GITHUB_WORKSPACE' && BUILDDIR=/home/builder/.cache/makepkg makepkg --noconfirm --clean"
           rm PKGBUILD
+
+      - name: Validate package
+        id: package
+        run: |
+          set -- "$GITHUB_WORKSPACE"/lan-mouse-*.pkg.tar.zst
+          if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then
+            set --
+          fi
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Expected exactly one release package, found $#" >&2
+            exit 1
+          fi
+          package=$1
+
+          project_version=$(awk -F'"' '/^\[package\]/{p=1} p && /^version/{print $2; exit}' Cargo.toml)
+          expected_version="${project_version}.r$(git rev-list --count HEAD).g$(git rev-parse --short HEAD)-1"
+          actual_version=$(bsdtar -xOf "$package" .PKGINFO | sed -n 's/^pkgver = //p')
+          if [ "$actual_version" != "$expected_version" ]; then
+            echo "Unexpected package version: $actual_version (expected $expected_version)" >&2
+            exit 1
+          fi
+
+          for entry in \
+            usr/bin/lan-mouse \
+            usr/lib/systemd/user/lan-mouse.service \
+            usr/lib/firewalld/services/lan-mouse.xml \
+            usr/share/applications/de.feschber.LanMouse.desktop \
+            usr/share/icons/hicolor/scalable/apps/de.feschber.LanMouse.svg
+          do
+            if ! bsdtar -tf "$package" | grep -qx "$entry"; then
+              echo "Missing package entry: $entry" >&2
+              exit 1
+            fi
+          done
+
+          pacman -Qip "$package"
+          desktop-file-validate de.feschber.LanMouse.desktop
+          target/release/lan-mouse --version
+
+          namcap "$package" 2>&1 | tee /tmp/namcap.log
+          if grep -q ' E: ' /tmp/namcap.log; then
+            echo "namcap reported packaging errors" >&2
+            exit 1
+          fi
+
+          echo "path=$(basename "$package")" >> "$GITHUB_OUTPUT"
 
       - name: Upload package
         uses: actions/upload-artifact@v6
         with:
           name: lan-mouse-x86_64-pacman
-          path: "*.pkg.tar.zst"
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
 
   windows-package:
-    runs-on: windows-2025
-    env:
-      # single knob for the GTK toolchain: picks the gvsbuild release (and
-      # thereby the gtk4/libadwaita/librsvg versions it builds) and keys the
-      # cache, so bumping it invalidates the cache instead of being masked
-      # by it; keep in sync with rust.yml, which shares the cache
-      GVSBUILD_VERSION: '2026.6.0'
+    runs-on: windows-2022
     steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       # the cache path must exist before the restore step runs
-      - name: Create gtk dir
+      - name: Create GTK directory
         run: mkdir C:\gtk-build\gtk\x64\release
 
-      # no restore-keys on purpose: a prefix match would silently restore a
-      # toolchain built by a different gvsbuild release
-      - uses: actions/cache@v4
-        id: cache
+      # keep in sync with rust.yml windows-gtk: the same key means checks and
+      # packaging share one gtk toolchain cache
+      - name: Restore GTK cache
+        id: gtk-cache
+        uses: actions/cache@v6
         with:
-          path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build-${{ env.GVSBUILD_VERSION }}
+          path: C:\gtk-build\gtk\x64\release
+          key: gtk-windows-vs2022-gvsbuild-2026.6.0
 
-      - name: Set up toolchain environment
-        run: |
-          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # gvsbuild's pkgconf treats its own prefix as a system directory and
-          # omits the -L flags the linker needs unless this is set
-          echo "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Build GTK with gvsbuild
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Build GTK
+        if: steps.gtk-cache.outputs.cache-hit != 'true'
         run: |
           py -m venv .venv
           .venv\Scripts\activate.ps1
-          py -m pip install gvsbuild==$env:GVSBUILD_VERSION
-          # git's bundled unix tools shadow the msys2 ones gvsbuild needs,
-          # see https://github.com/wingtk/gvsbuild/pull/1004
-          Move-Item "C:\Program Files\Git\usr\bin" "C:\Program Files\Git\usr\notbin"
-          Move-Item "C:\Program Files\Git\bin" "C:\Program Files\Git\notbin"
-          gvsbuild build --msys-dir=C:\msys64 gtk4 libadwaita librsvg
-          Move-Item "C:\Program Files\Git\usr\notbin" "C:\Program Files\Git\usr\bin"
-          Move-Item "C:\Program Files\Git\notbin" "C:\Program Files\Git\bin"
+          py -m pip install gvsbuild==2026.6.0
+          gvsbuild build --vs-ver vs2022 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
 
       - uses: actions/checkout@v6
+
+      - name: Configure GTK environment
+        run: |
+          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Release build
         run: cargo build --release
@@ -109,3 +145,4 @@ jobs:
         with:
           name: lan-mouse-x86_64-windows-portable
           path: lan-mouse-windows-x86_64.zip
+          if-no-files-found: error

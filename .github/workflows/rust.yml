@@ -22,19 +22,35 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
+  windows-gtk:
+    name: Prepare GTK for Windows
+    runs-on: windows-2022
+    steps:
+      - name: Create GTK directory
+        run: mkdir C:\gtk-build\gtk\x64\release
+      # keep in sync with nightly.yml windows-package, which shares this cache
+      - name: Restore GTK cache
+        id: gtk-cache
+        uses: actions/cache@v6
+        with:
+          path: C:\gtk-build\gtk\x64\release
+          key: gtk-windows-vs2022-gvsbuild-2026.6.0
+      - name: Build GTK
+        if: steps.gtk-cache.outputs.cache-hit != 'true'
+        run: |
+          py -m venv .venv
+          .venv\Scripts\activate.ps1
+          py -m pip install gvsbuild==2026.6.0
+          gvsbuild build --vs-ver vs2022 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
+
   ci:
     name: ${{ matrix.job }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    env:
-      # keep in sync with nightly.yml: the same version and cache key mean
-      # checks and packaging share one gtk toolchain cache
-      GVSBUILD_VERSION: '2026.6.0'
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-24.04
-          - windows-2025
           - macos-15
           - macos-15-intel
         job:
@@ -59,44 +75,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ env.MACOS_LIB_VER }}
-      - uses: actions/setup-python@v5
-        if: runner.os == 'Windows'
-        with:
-          python-version: '3.11'
-      # the cache path must exist before the restore step runs
-      - name: Install Windows Dependencies - create gtk dir
-        if: runner.os == 'Windows'
-        run: mkdir C:\gtk-build\gtk\x64\release
-      # no restore-keys on purpose: a prefix match would silently restore a
-      # toolchain built by a different gvsbuild release
-      - name: Install Windows Dependencies - install gtk from cache
-        uses: actions/cache@v4
-        if: runner.os == 'Windows'
-        id: cache
-        with:
-          path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build-${{ env.GVSBUILD_VERSION }}
-      - name: Install Windows Dependencies - set up toolchain environment
-        if: runner.os == 'Windows'
-        run: |
-          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # gvsbuild's pkgconf treats its own prefix as a system directory and
-          # omits the -L flags the linker needs unless this is set
-          echo "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Install Windows dependencies - build gtk
-        if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
-        run: |
-          py -m venv .venv
-          .venv\Scripts\activate.ps1
-          py -m pip install gvsbuild==$env:GVSBUILD_VERSION
-          # git's bundled unix tools shadow the msys2 ones gvsbuild needs,
-          # see https://github.com/wingtk/gvsbuild/pull/1004
-          Move-Item "C:\Program Files\Git\usr\bin" "C:\Program Files\Git\usr\notbin"
-          Move-Item "C:\Program Files\Git\bin" "C:\Program Files\Git\notbin"
-          gvsbuild build --msys-dir=C:\msys64 gtk4 libadwaita librsvg
-          Move-Item "C:\Program Files\Git\usr\notbin" "C:\Program Files\Git\usr\bin"
-          Move-Item "C:\Program Files\Git\notbin" "C:\Program Files\Git\bin"
       - name: cargo build
         if: matrix.job == 'build'
         run: cargo build
@@ -113,6 +91,48 @@ jobs:
         if: matrix.job == 'clippy'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - uses: clechasseur/rs-clippy-check@v4
+        if: matrix.job == 'clippy'
+        with:
+          args: --workspace --all-targets --all-features
+
+  windows-ci:
+    name: ${{ matrix.job }} windows-2022
+    needs: windows-gtk
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - build
+          - check
+          - clippy
+          - test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore GTK cache
+        uses: actions/cache@v6
+        with:
+          path: C:\gtk-build\gtk\x64\release
+          key: gtk-windows-vs2022-gvsbuild-2026.6.0
+          fail-on-cache-miss: true
+      - name: Configure GTK environment
+        run: |
+          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: cargo build
+        if: matrix.job == 'build'
+        run: cargo build
+      - name: cargo check
+        if: matrix.job == 'check'
+        run: cargo check --workspace --all-targets --all-features
+      - name: cargo test
+        if: matrix.job == 'test'
+        run: cargo test --workspace --all-features
+      - name: cargo clippy
+        if: matrix.job == 'clippy'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - uses: clechasseur/rs-clippy-check@v4
         if: matrix.job == 'clippy'
         with:

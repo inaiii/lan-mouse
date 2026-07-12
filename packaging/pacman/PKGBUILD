@@ -1,20 +1,22 @@
 # Maintainer: inaiii <junming.dai@outlook.com>
 # Nightly pacman package, built by .github/workflows/nightly-pacman.yml
-# from whatever commit triggered the workflow. pkgver is derived from the
-# commit history so it always increases, without needing version tags.
+# from the commit that triggered the workflow. pkgver combines the Cargo
+# version with the full-history commit count and short commit hash.
 pkgname=lan-mouse
 pkgver=0.0.0.r0.g0000000
 pkgrel=1
 pkgdesc="Software KVM Switch / mouse & keyboard sharing software for Local Area Networks"
 arch=('x86_64')
-url="https://github.com/feschber/lan-mouse"
+url="https://github.com/inaiii/lan-mouse"
 license=('GPL-3.0-or-later')
-depends=('gtk4' 'libadwaita' 'libx11' 'libxtst')
+depends=('gdk-pixbuf2' 'glib2' 'glibc' 'gtk4' 'libadwaita' 'libgcc' 'libx11' 'libxtst')
 makedepends=('rust' 'git')
+optdepends=('firewalld: pre-defined firewall service')
+conflicts=('lan-mouse-bin' 'lan-mouse-git')
 # makepkg's default LTO CFLAGS injection produces GCC LTO bitcode objects for
 # ring's C/asm code that rustc/lld can't link against (undefined ring_core_*
 # symbols); the project's own release LTO (Cargo.toml) is unaffected by this.
-options=('!lto')
+options=('!lto' '!debug')
 
 pkgver() {
   cd "$startdir"
@@ -31,6 +33,7 @@ build() {
 package() {
   cd "$startdir"
   install -Dm755 target/release/lan-mouse "$pkgdir/usr/bin/lan-mouse"
+  install -Dm644 firewall/lan-mouse.xml "$pkgdir/usr/lib/firewalld/services/lan-mouse.xml"
   install -Dm644 de.feschber.LanMouse.desktop "$pkgdir/usr/share/applications/de.feschber.LanMouse.desktop"
   install -Dm644 lan-mouse-gtk/resources/de.feschber.LanMouse.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/de.feschber.LanMouse.svg"
   install -Dm644 service/lan-mouse.service "$pkgdir/usr/lib/systemd/user/lan-mouse.service"
