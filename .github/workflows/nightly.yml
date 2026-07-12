@@ -1,0 +1,104 @@
+name: Nightly Package
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pacman-package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed sudo git rust gtk4 libadwaita libx11 libxtst
+
+      - name: Create unprivileged build user
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v6
+
+      - name: Allow git commands in workspace owned by another user
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Hand workspace over to build user
+        run: chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: makepkg
+        run: |
+          # makepkg requires PKGBUILD to sit in the CWD; packaging/pacman/PKGBUILD
+          # is the source of truth, copy it to the repo root just for the build.
+          cp packaging/pacman/PKGBUILD PKGBUILD
+          su - builder -c "cd '$GITHUB_WORKSPACE' && makepkg --noconfirm --syncdeps --clean"
+          rm PKGBUILD
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: lan-mouse-x86_64-pacman
+          path: "*.pkg.tar.zst"
+
+  windows-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # the cache path must exist before the restore step runs
+      - name: Create gtk dir
+        run: mkdir C:\gtk-build\gtk\x64\release
+
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: c:/gtk-build/gtk/x64/release/**
+          key: gtk-windows-build
+          restore-keys: gtk-windows-build
+
+      - name: Set up toolchain environment
+        run: |
+          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # gvsbuild's pkgconf treats its own prefix as a system directory and
+          # omits the -L flags the linker needs unless this is set
+          echo "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build GTK with gvsbuild
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          py -m venv .venv
+          .venv\Scripts\activate.ps1
+          py -m pip install gvsbuild
+          # git's bundled unix tools shadow the msys2 ones gvsbuild needs,
+          # see https://github.com/wingtk/gvsbuild/pull/1004
+          Move-Item "C:\Program Files\Git\usr\bin" "C:\Program Files\Git\usr\notbin"
+          Move-Item "C:\Program Files\Git\bin" "C:\Program Files\Git\notbin"
+          gvsbuild build --msys-dir=C:\msys64 gtk4 libadwaita librsvg
+          Move-Item "C:\Program Files\Git\usr\notbin" "C:\Program Files\Git\usr\bin"
+          Move-Item "C:\Program Files\Git\notbin" "C:\Program Files\Git\bin"
+
+      - uses: actions/checkout@v6
+
+      - name: Release build
+        run: cargo build --release
+
+      # portable package: the exe next to every gtk runtime dll, no installer
+      - name: Create archive
+        run: |
+          mkdir "lan-mouse-windows"
+          Get-ChildItem -Path "C:\gtk-build\gtk\x64\release\bin\*.dll" -File -Recurse | Copy-Item -Destination "lan-mouse-windows"
+          Copy-Item -Path "target\release\lan-mouse.exe" -Destination "lan-mouse-windows"
+          Compress-Archive -Path "lan-mouse-windows\*" -DestinationPath lan-mouse-windows-x86_64.zip
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: lan-mouse-x86_64-windows-portable
+          path: lan-mouse-windows-x86_64.zip
