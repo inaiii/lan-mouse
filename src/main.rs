@@ -80,7 +80,9 @@ fn run() -> Result<(), LanMouseError> {
                 // over should the external daemon exit right after.
                 let owns_service = !external_service_running();
                 let mut service = start_service()?;
-                let res = lan_mouse_gtk::run(config::local_commit(), owns_service);
+                let options =
+                    lan_mouse_gtk::RunOptions::default().with_service_ownership(owns_service);
+                let res = lan_mouse_gtk::run_with_options(config::local_commit(), options);
                 #[cfg(unix)]
                 {
                     // on unix we give the service a chance to terminate gracefully
@@ -127,7 +129,7 @@ where
 /// Whether a lan-mouse service not owned by this process is already
 /// listening on the lan-mouse socket. In that case the GUI acts as a
 /// pure client: quitting it must not suggest stopping the service.
-#[cfg(all(feature = "gtk", unix, not(target_os = "macos")))]
+#[cfg(all(feature = "gtk", target_os = "linux"))]
 fn external_service_running() -> bool {
     let Ok(path) = lan_mouse_ipc::default_socket_path() else {
         return false;
@@ -135,7 +137,7 @@ fn external_service_running() -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-#[cfg(all(feature = "gtk", any(not(unix), target_os = "macos")))]
+#[cfg(all(feature = "gtk", not(target_os = "linux")))]
 fn external_service_running() -> bool {
     false
 }

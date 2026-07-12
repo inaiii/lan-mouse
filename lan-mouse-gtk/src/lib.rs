@@ -4,7 +4,7 @@ mod client_row;
 mod fingerprint_window;
 mod key_object;
 mod key_row;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 mod linux_status_item;
 #[cfg(target_os = "macos")]
 mod macos_privacy;
@@ -24,11 +24,34 @@ use window::Window;
 pub(crate) static LOCAL_COMMIT: OnceLock<[u8; 8]> = OnceLock::new();
 
 /// Whether the lan-mouse service is a child of this process, set once
-/// by [`run`] before the GTK main loop starts. When `false` the GUI is
-/// a pure client of an external daemon (e.g. a systemd service): it
-/// then runs as a plain window — no tray icon, closing the window
-/// quits the frontend and leaves the daemon untouched.
+/// by [`run_with_options`] before the GTK main loop starts. When `false`
+/// the GUI is a pure client of an external daemon (e.g. a systemd
+/// service): it then runs as a plain window — no tray icon, closing the
+/// window quits the frontend and leaves the daemon untouched.
 pub(crate) static OWNS_SERVICE: OnceLock<bool> = OnceLock::new();
+
+/// Options controlling how the GTK frontend integrates with its service.
+#[derive(Clone, Copy, Debug)]
+pub struct RunOptions {
+    owns_service: bool,
+}
+
+impl RunOptions {
+    /// Marks whether the service is owned by the process running the frontend.
+    ///
+    /// On Linux, externally managed services use plain-window semantics rather
+    /// than creating a tray icon. This option has no effect on other platforms.
+    pub fn with_service_ownership(mut self, owns_service: bool) -> Self {
+        self.owns_service = owns_service;
+        self
+    }
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self { owns_service: true }
+    }
+}
 
 /// Convenience: returns the local commit as an 8-char ASCII string,
 /// or a placeholder if unset (which would indicate a programmer
@@ -58,13 +81,19 @@ pub enum GtkError {
     NonZeroExitCode(i32),
 }
 
-pub fn run(local_commit: [u8; 8], owns_service: bool) -> Result<(), GtkError> {
+/// Runs the GTK frontend assuming it owns the service it connects to.
+pub fn run(local_commit: [u8; 8]) -> Result<(), GtkError> {
+    run_with_options(local_commit, RunOptions::default())
+}
+
+/// Runs the GTK frontend with explicit lifecycle integration options.
+pub fn run_with_options(local_commit: [u8; 8], options: RunOptions) -> Result<(), GtkError> {
     log::debug!("running gtk frontend");
     LOCAL_COMMIT
         .set(local_commit)
         .expect("local_commit set once");
     OWNS_SERVICE
-        .set(owns_service)
+        .set(options.owns_service)
         .expect("owns_service set once");
 
     #[cfg(windows)]
@@ -288,7 +317,7 @@ fn build_ui(app: &Application) {
     // window would otherwise be unreachable. When the service belongs
     // to an external daemon the GUI is a pure client and gets no tray
     // at all — quitting it must not suggest stopping the service.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     let tray_active = {
         let owns_service = OWNS_SERVICE.get().copied().unwrap_or(true);
         if !owns_service {
@@ -351,13 +380,13 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    #[cfg(windows)]
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
     window.present();
 
     // Like on macOS below: present on every launch unless
     // `LAN_MOUSE_HIDDEN=1` requests a quiet start into the tray.
     // Without a tray the window is always presented.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     if !tray_active || env::var_os("LAN_MOUSE_HIDDEN").is_none() {
         window.present();
     }
