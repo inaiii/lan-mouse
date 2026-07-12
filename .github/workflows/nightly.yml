@@ -123,6 +123,9 @@ jobs:
           gvsbuild build --vs-ver vs2022 --msys-dir=C:\msys64 gtk4 libadwaita librsvg
 
       - uses: actions/checkout@v6
+        with:
+          # full history: the nightly version is derived from the commit count
+          fetch-depth: 0
 
       - name: Configure GTK environment
         run: |
@@ -140,9 +143,30 @@ jobs:
           Copy-Item -Path "target\release\lan-mouse.exe" -Destination "lan-mouse-windows"
           Compress-Archive -Path "lan-mouse-windows\*" -DestinationPath lan-mouse-windows-x86_64.zip
 
-      - name: Upload package
+      - name: Upload portable package
         uses: actions/upload-artifact@v6
         with:
           name: lan-mouse-x86_64-windows-portable
           path: lan-mouse-windows-x86_64.zip
+          if-no-files-found: error
+
+      # same pkgver scheme as the pacman package
+      - name: Compute nightly version
+        id: version
+        run: |
+          $base = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $count = git rev-list --count HEAD
+          $sha = git rev-parse --short HEAD
+          "display=$base.r$count.g$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "numeric=$base.$count" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      # setup.exe with the same staged payload as the portable zip
+      - name: Build installer
+        run: iscc /Qp "/DAppVer=${{ steps.version.outputs.display }}" "/DAppVerNumeric=${{ steps.version.outputs.numeric }}" "/DStageDir=$env:GITHUB_WORKSPACE\lan-mouse-windows" "/O$env:GITHUB_WORKSPACE" build-aux\windows\installer.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: lan-mouse-x86_64-windows-setup
+          path: lan-mouse-setup-x86_64.exe
           if-no-files-found: error
